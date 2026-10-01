@@ -1,0 +1,113 @@
+#!/bin/bash
+# Instalador combinado ADMRufu + HCR Server con autoarranque
+
+set -euo pipefail
+
+### ==============================
+### Script 1: Instalación ADMRufu
+### ==============================
+echo "[+] Ejecutando instalación de ADMRufu..."
+
+clear
+if ! loginctl show-user root | grep -q '^Linger=yes'; then
+    loginctl enable-linger root
+fi
+
+if [ ! -d /run/user/0 ]; then
+    mkdir -p /run/user/0
+    chmod 700 /run/user/0
+    chown root:root /run/user/0
+fi
+
+if [ -z "$XDG_RUNTIME_DIR" ]; then
+    export XDG_RUNTIME_DIR=/run/user/0
+fi
+
+echo "[+] Detectando sistema..."
+. /etc/os-release
+
+sudo apt-get update
+sudo apt-get install -y gnupg wget software-properties-common lsb-release
+
+if [[ "$ID" == "ubuntu" ]]; then
+    echo "[+] Ubuntu detectado ..."
+    sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test < /dev/null
+    sudo apt-get update
+    sudo apt-get install -y libstdc++6
+elif [[ "$ID" == "debian" ]]; then
+    echo "[+] Debian detectado ..."
+    dpkg-query -W -f='${Status}' libstdc++6 > /dev/null 2>&1 || sudo apt-get install -y libstdc++6
+else
+    echo "[!] Sistema no soportado automáticamente. Abortando..."
+    exit 1
+fi
+
+echo "[+] Instalando libcurl4-openssl-dev ..."
+sudo apt-get install -y libcurl4-openssl-dev
+
+echo "[+] Creando helper ipget..."
+cat > /usr/local/bin/ipget <<'EOF'
+#!/bin/bash
+IP=$(curl -s --max-time 3 https://api.ipify.org 2>/dev/null)
+if echo "$IP" | grep -qE "^([0-9]{1,3}\.){3}[0-9]{1,3}$"; then echo "$IP"; exit 0; fi
+IP=$(curl -s --max-time 3 https://icanhazip.com 2>/dev/null)
+if echo "$IP" | grep -qE "^([0-9]{1,3}\.){3}[0-9]{1,3}$"; then echo "$IP"; exit 0; fi
+hostname -I 2>/dev/null
+EOF
+chmod +x /usr/local/bin/ipget
+
+echo "[+] Descargando instalador ADMRufu..."
+rm -rf /root/install
+wget --no-cache -O /root/install "https://github.com/karl1999x/ADMRufu2.0/raw/main/install"
+chmod +x /root/install
+/root/install
+
+### ==============================
+### Script 2: Instalación HCR Server
+### ==============================
+echo "[+] Configurando HCR Server..."
+
+# Alias para hcr
+echo "alias hcr2='/root/hcr.sh'" >> ~/.bashrc
+
+INSTALL_DIR="/etc/hcr-server"
+BINARY_PATH="${INSTALL_DIR}/hcr-server"
+BINARY_URL="https://www.dropbox.com/scl/fi/pz28qnrdm9box9267ok0i/hcr-server.bin?rlkey=y1x8ryvgx3wb4hwtf2hn62lag&st=c5d3zvl3&dl=1"
+
+mkdir -p "${INSTALL_DIR}"
+chmod 700 "${INSTALL_DIR}"
+
+echo "[+] Descargando hcr-server..."
+curl -fsSL -L -o "${BINARY_PATH}" "${BINARY_URL}"
+chmod +x "${BINARY_PATH}"
+
+### ==============================
+### Systemd Service para autoarranque
+### ==============================
+echo "[+] Configurando servicio systemd para HCR Server..."
+
+cat > /etc/systemd/system/hcr-server.service <<EOF
+[Unit]
+Description=HCR Server
+After=network.target
+
+[Service]
+ExecStart=${BINARY_PATH} --listen :22 --target 127.0.0.1:22 --transport plain --max-download-frame 16384 --download-poll-timeout 6s
+Restart=always
+User=root
+WorkingDirectory=${INSTALL_DIR}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+chmod 644 /etc/systemd/system/hcr-server.service
+systemctl daemon-reload
+systemctl enable --now hcr-server.service
+
+### ==============================
+### Finalización
+### ==============================
+echo "✅ Instalación completa: ADMRufu + HCR Server"
+echo "➡ HCR Server ya está corriendo como servicio systemd."
+echo "➡ Usa 'hcr2' cuando quieras abrir el menú interactivo."
